@@ -8,6 +8,8 @@ let attribution;
 let satIcon = L.icon({
   iconUrl: "img/sat_icon.png",
   iconSize: [30, 30],
+  iconAnchor: [15, 15],
+  popupAnchor: [0, -15]
 });
 let tleDate;
 let tleTime;
@@ -19,7 +21,8 @@ initializeMap()
   .then(getPositions)
   .then(getFeatures)
   .then(drawMarkers)
-  .then(updateFeatures);
+  .then(updateFeatures)
+  .catch(error => console.error('Fehler in der Initialisierung:', error));
 
 function convertTime(tleDateString) {
   let d = tleDateString.split(" ");
@@ -30,36 +33,50 @@ function convertTime(tleDateString) {
 }
 
 async function parseTles() {
-  const file = await fetch("tles.txt");
-  const tlesRaw = await file.text();
-  const tlesArray = tlesRaw.replace(/\r?\n$/g, "").split(/\r?\n/); // make array
-
-  tleTime = convertTime(tlesArray[0]); // date of tle @ index 0
-  tleDate = new Date(tleTime);
-  tlesArray.shift();
-
-  return tlesArray.reduce((result, currentEntry, index) => {
-    if (index % 3 === 0) {
-      currentEntry = currentEntry.trim();
-      result.push([]);
+  try {
+    const response = await fetch("tles.txt");
+    const data = await response.text();
+    console.log("Geladene TLEs:", data);
+    
+    tleDate = new Date();
+    
+    let lines = data.split("\n");
+    for (let i = 0; i < lines.length; i += 3) {
+      if (lines[i] && lines[i + 1] && lines[i + 2]) {
+        tles.push([lines[i].trim(), lines[i + 1].trim(), lines[i + 2].trim()]);
+      }
     }
-    result[result.length - 1].push(currentEntry);
-    return result; // restructured (multidimens) array
-  }, tles);
+    console.log("Verarbeitete TLEs:", tles);
+    return tles;
+  } catch (error) {
+    console.error("Fehler beim Laden der TLEs:", error);
+    return [];
+  }
 }
 
 async function getPositions(parsedTLEs) {
-  let currentDate = new Date();
-  return parsedTLEs.reduce((result, currentEntry) => {
-    let satrec = satellite.twoline2satrec(currentEntry[1], currentEntry[2]);
-    let positionAndVelocity = satellite.propagate(satrec, currentDate);
-    let positionGd = satellite.eciToGeodetic(
-      positionAndVelocity.position,
-      satellite.gstime(currentDate)
-    );
-    result.push([currentEntry, positionGd]);
-    return result;
-  }, []);
+  try {
+    let currentDate = new Date();
+    const positions = parsedTLEs.reduce((result, currentEntry) => {
+      let satrec = satellite.twoline2satrec(currentEntry[1], currentEntry[2]);
+      if (!satrec) return result;
+
+      let positionAndVelocity = satellite.propagate(satrec, currentDate);
+      if (!positionAndVelocity.position) return result;
+
+      let positionGd = satellite.eciToGeodetic(
+        positionAndVelocity.position,
+        satellite.gstime(currentDate)
+      );
+      result.push([currentEntry, positionGd]);
+      return result;
+    }, []);
+    console.log("Berechnete Positionen:", positions);
+    return positions;
+  } catch (error) {
+    console.error("Fehler bei der Positionsberechnung:", error);
+    return [];
+  }
 }
 
 async function getFeatures(satellites) {
@@ -96,14 +113,16 @@ async function updateFeatures(markers) {
 
   const newPositions = await getPositions(tles);
   markers.forEach((marker, i) => {
+    if (!newPositions[i]) return;
+    
     marker.setLatLng([
-      satellite.degreesLong(newPositions[i][1].latitude),
-      satellite.degreesLong(newPositions[i][1].longitude),
+      satellite.degreesLat(newPositions[i][1].latitude),
+      satellite.degreesLong(newPositions[i][1].longitude)
     ]);
     marker.feature.properties.height = newPositions[i][1].height;
     marker.feature.geometry.coordinates = [
       satellite.degreesLong(newPositions[i][1].longitude),
-      satellite.degreesLat(newPositions[i][1].latitude),
+      satellite.degreesLat(newPositions[i][1].latitude)
     ];
   });
 
@@ -159,28 +178,37 @@ async function initializeMap() {
   leafletMap = await L.map(document.getElementById("map"), {
     zoom: 4,
     center: [48.13, 11.57],
-    worldCopyJump: false,
+    worldCopyJump: true,
     attributionControl: false,
     layers: [L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png")],
   });
+  
   attribution = await L.control
     .attribution({
       position: "topright",
       prefix: "",
     })
     .addTo(leafletMap);
+    
   L.control
     .locate({
       drawCircle: true,
       keepCurrentZoomLevel: true,
     })
     .addTo(leafletMap);
+    
   return;
 }
 
 async function drawMarkers(features) {
+  if (!features || features.length === 0) {
+    console.error('Keine Features zum Zeichnen vorhanden');
+    return [];
+  }
+
   let markers = [];
   let orbitLayer = L.layerGroup();
+  
   attribution.setPrefix(
     ' <a href="https://www.celestrak.com/NORAD/elements/supplemental/" target="_blank">TLE</a>: ' +
       tleDate.toLocaleTimeString() +
@@ -189,6 +217,7 @@ async function drawMarkers(features) {
       ' <a href="https://leafletjs.com">Leaflet</a> |' +
       ' <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   );
+  
   L.geoJSON(features, {
     pointToLayer: function (feature, latlng) {
       let marker = L.marker(latlng, { icon: satIcon }).bindPopup(
@@ -203,7 +232,6 @@ async function drawMarkers(features) {
     onEachFeature: function (feature, layer) {
       layer.on({
         click: function () {
-          // do manually cause auto open seems buggy on a few markers
           layer.openPopup();
           orbitLayer
             .addLayer(
@@ -233,5 +261,6 @@ async function drawMarkers(features) {
       });
     },
   }).addTo(leafletMap);
+  
   return markers;
 }
